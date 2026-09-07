@@ -2831,18 +2831,44 @@ requestDeepSeekNetworkCacheReplay();
 // ---------------------------------------------------------------------------
 
 /**
- * Returns a promise that resolves after `ms` milliseconds using a Web Worker
- * timer — immune to Chrome's background-tab throttling of setTimeout.
+ * Gemini forbids blob Workers, so use its page timer. Other providers retain
+ * worker timing with a page-timer fallback if worker startup or execution fails.
  */
 function workerSleep(ms) {
+  if (SITE_ADAPTER?.siteId === "gemini") return sleep(ms);
   return new Promise((resolve) => {
-    const blob = new Blob(
-      [`setTimeout(() => postMessage('done'), ${ms})`],
-      { type: "application/javascript" }
-    );
-    const url = URL.createObjectURL(blob);
-    const w   = new Worker(url);
-    w.onmessage = () => { w.terminate(); URL.revokeObjectURL(url); resolve(); };
+    let worker = null;
+    let url = null;
+    const cleanupWorker = () => {
+      if (worker) {
+        worker.onmessage = null;
+        worker.onerror = null;
+        worker.terminate();
+        worker = null;
+      }
+      if (url) {
+        URL.revokeObjectURL(url);
+        url = null;
+      }
+    };
+    const finish = () => {
+      clearTimeout(timer);
+      cleanupWorker();
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    try {
+      const blob = new Blob(
+        [`setTimeout(() => postMessage('done'), ${ms})`],
+        { type: "application/javascript" },
+      );
+      url = URL.createObjectURL(blob);
+      worker = new Worker(url);
+      worker.onmessage = finish;
+      worker.onerror = () => cleanupWorker();
+    } catch (_) {
+      cleanupWorker();
+    }
   });
 }
 

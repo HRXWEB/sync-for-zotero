@@ -33,7 +33,7 @@ function content(html = "", url = chatUrl) {
   const api = vm.runInContext(`({ adapter: SITE_ADAPTER, extractConversationTranscript,
     findStopButton, collectHealthStatus, collectHistoryEntries,
     collectVisibleComposerPdfCardEvidence, resolveBoundAssistantTurn,
-    findMatchingUserTurn, hasResponseActionBar, attachPDF, submitMessageAndVerify, streamResponseSnapshots,
+    findMatchingUserTurn, hasResponseActionBar, attachPDF, submitMessageAndVerify, streamResponseSnapshots, workerSleep,
     assertSubmissionConversation: typeof assertSubmissionConversation === "function" ? assertSubmissionConversation : null })`, context);
   return { ...api, document, context, listeners };
 }
@@ -355,4 +355,49 @@ test("fast completed Gemini PDF turn emits the bound seq/attempt receipt through
   assert.equal(terminal.diagnostic.submittedAttachmentVerified, true);
   assert.equal(terminal.diagnostic.attachmentReadyVerified, true);
   assert.match(terminal.text, /GEMINI-PDF-73B9/);
+});
+
+test("Gemini production timer resolves when browser CSP forbids blob Workers", async () => {
+  const page = content();
+  let workerAttempts = 0;
+  page.context.Blob = Blob;
+  page.context.URL = { createObjectURL: () => "blob:blocked", revokeObjectURL() {} };
+  page.context.Worker = class { constructor() { workerAttempts++; throw new Error("CSP blocks blob worker"); } };
+  await page.workerSleep(5);
+  assert.equal(workerAttempts, 0);
+});
+
+test("production worker timer resolves and releases resources after asynchronous worker failure", async () => {
+  const page = content("", "https://chatgpt.com/");
+  let terminated = 0;
+  const revoked = [];
+  page.context.Blob = Blob;
+  page.context.URL = { createObjectURL: () => "blob:failed", revokeObjectURL: (url) => revoked.push(url) };
+  page.context.Worker = class {
+    constructor() { setTimeout(() => this.onerror?.({ preventDefault() {} }), 0); }
+    terminate() { terminated++; }
+  };
+  const result = await Promise.race([page.workerSleep(5).then(() => "resolved"), new Promise((resolve) => setTimeout(() => resolve("hung"), 100))]);
+  assert.equal(result, "resolved");
+  assert.equal(terminated, 1);
+  assert.deepEqual(revoked, ["blob:failed"]);
+});
+
+test("Gemini submitted PDF filenames must match completely without legacy suffix or duplicate-name matching", () => {
+  const page = content();
+  for (const name of ["wrong-test.pdf", "test (2).pdf", "test.pdf.backup", "test….pdf"]) {
+    const receipt = page.adapter.classifySubmittedAttachments([name], "test.pdf");
+    assert.equal(receipt.filenameMatched, false, name);
+    assert.equal(receipt.contractVerified, false, name);
+  }
+  assert.equal(page.adapter.classifySubmittedAttachments(["  Cafe\u0301.pdf  "], "Café.pdf").contractVerified, true);
+});
+
+test("Gemini readiness completes using production timers under blocked-worker CSP", { timeout: 2500 }, async () => {
+  const page = content(read("fixtures/gemini-observed-dom.html"));
+  page.context.MutationObserver = page.context.window.MutationObserver;
+  page.context.Worker = class { constructor() { throw new Error("CSP blocks blob worker"); } };
+  const ready = await vm.runInContext("waitForChatReady(null, 2000)", page.context);
+  assert.equal(ready.ok, true);
+  assert.equal(ready.ready, true);
 });

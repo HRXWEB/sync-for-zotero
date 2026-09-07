@@ -70,8 +70,14 @@
         getComposerAttachments,
         classifySubmittedAttachments(attachments, expectedFilename) {
           const contract = shared.classifySubmittedPdfContract(attachments, expectedFilename);
-          return { ...contract, contractVerified: expectedFilename
-            ? contract.pdfAttachmentCount === 1 && contract.filenameMatched === true
+          // Gemini exposes the complete filename stem and extension separately.
+          // Its receipt must not inherit legacy substring/elision/rename matches.
+          const normalizeFilename = (name) => String(name || "").normalize("NFC").trim();
+          const filenameMatched = expectedFilename
+            ? attachments.some((name) => normalizeFilename(name) === normalizeFilename(expectedFilename))
+            : null;
+          return { ...contract, filenameMatched, contractVerified: expectedFilename
+            ? contract.pdfAttachmentCount === 1 && filenameMatched === true
             : attachments.length === 0 || attachments.every((name) => /^image(?:_\d+)?$/.test(name)) };
         },
         async uploadFile(file, { wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now(), timeoutMs = 45000 } = {}) {
