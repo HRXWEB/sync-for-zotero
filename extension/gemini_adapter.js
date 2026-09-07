@@ -95,7 +95,9 @@
             ? contract.pdfAttachmentCount === 1 && filenameMatched === true
             : attachments.length === 0 || attachments.every((name) => /^image(?:_\d+)?$/.test(name)) };
         },
-        resolveReplacementUserTurn({ transcript, baseline, promptText, expectedPdfFilename, expectedImageCount }) {
+        resolveReplacementUserTurn({ transcript, baseline, expectedChatUrl, promptText, expectedPdfFilename, expectedImageCount }) {
+          const conversationUrl = shared.normalizeGeminiConversationUrl(expectedChatUrl || baseline.chatUrl);
+          if (!conversationUrl || shared.normalizeGeminiConversationUrl(transcript.chatUrl) !== conversationUrl) return null;
           // A replaced provisional node has no observable link to its new ID.
           // Rebind only while the entire pre-send baseline remains identifiable
           // in order, with exactly one subsequent user carrying this request.

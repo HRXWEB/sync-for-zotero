@@ -3188,6 +3188,23 @@ async function streamResponseSnapshots(
   const baselineAssistantSnapshot = getLatestAssistantSignature();
   let remoteChatUrl = baseline.chatUrl;
   let remoteChatId = baseline.chatId;
+  let pinnedGeminiChatUrl = SITE_ADAPTER?.siteId === "gemini"
+    ? shared.normalizeGeminiConversationUrl(baseline.chatUrl) : null;
+  const assertTrackedConversation = (transcript) => {
+    if (SITE_ADAPTER?.siteId !== "gemini") return;
+    const chatUrl = shared.normalizeGeminiConversationUrl(transcript.chatUrl);
+    const isInitialHome = /^https:\/\/gemini\.google\.com\/app\/?(?:[?#]|$)/.test(transcript.chatUrl || "");
+    if ((pinnedGeminiChatUrl && chatUrl !== pinnedGeminiChatUrl) || (!chatUrl && !isInitialHome)) {
+      throw new Error("Gemini conversation changed while tracking the submitted turn.");
+    }
+    // A new chat may allocate its URL after Send. Once observed, its identity
+    // must survive DOM replacement and the final confirmation delay.
+    if (chatUrl) {
+      pinnedGeminiChatUrl = chatUrl;
+      remoteChatUrl = chatUrl;
+      remoteChatId = SITE_ADAPTER.getChatIdFromUrl(chatUrl);
+    }
+  };
   let userTurnKey = null;
   let assistantTurnKey = null;
   let answerRevision = 0;
@@ -3336,6 +3353,7 @@ async function streamResponseSnapshots(
       );
     }
     const transcript = extractConversationTranscript();
+    assertTrackedConversation(transcript);
     remoteChatUrl = transcript.chatUrl || requestContext?.chatUrl || remoteChatUrl;
     remoteChatId = transcript.chatId || requestContext?.chatId || remoteChatId;
     if (transcript.hash !== lastTranscriptHash) {
@@ -3389,7 +3407,8 @@ async function streamResponseSnapshots(
     );
     const replacementUserTurn = boundUserMissing
       ? SITE_ADAPTER.resolveReplacementUserTurn({
-        transcript, baseline, promptText, expectedPdfFilename, expectedImageCount,
+        transcript, baseline, expectedChatUrl: pinnedGeminiChatUrl,
+        promptText, expectedPdfFilename, expectedImageCount,
       })
       : null;
     if (replacementUserTurn) {
@@ -3811,6 +3830,7 @@ async function streamResponseSnapshots(
       // heuristics, especially after a discarded-tab reload.
       await workerSleep(strongTransportCompletion ? 250 : 750);
       const confirmedTranscript = extractConversationTranscript();
+      assertTrackedConversation(confirmedTranscript);
       const confirmedAssistantTurn = resolveBoundAssistantTurn(
         confirmedTranscript,
         userTurnKey,
@@ -4036,6 +4056,9 @@ async function streamResponseSnapshots(
 
   // Use SSE text as fallback if DOM-based answer extraction failed
   assertPipelineCurrent(isPipelineCurrent);
+  if (SITE_ADAPTER?.siteId === "gemini") {
+    assertTrackedConversation(extractConversationTranscript());
+  }
   const timeoutAnswerText = shared.hasMeaningfulAssistantText(lastAnswerText)
     ? lastAnswerText
     : (shared.hasMeaningfulAssistantText(sseText) ? sseText : lastAnswerText);

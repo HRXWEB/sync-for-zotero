@@ -526,15 +526,99 @@ for (const [followup, directReplacement] of [[false, false], [true, false], [fal
   });
 }
 
+for (const destination of [
+  "https://gemini.google.com/app/2222222222222222",
+  "https://gemini.google.com/app",
+  "https://gemini.google.com/",
+  "https://example.com/app/1111111111111111",
+  "https://gemini.google.com/app/thread-1",
+]) {
+  for (const timing of ["before matching", "after binding", "terminal confirmation"]) {
+    test(`Gemini tracker rejects navigation ${timing} to ${destination}`, async () => {
+      const origin = "https://gemini.google.com/app/1111111111111111";
+      const page = content("", origin);
+      const baseline = page.extractConversationTranscript();
+      page.document.body.innerHTML = '<div class="conversation-container"><user-query><div class="query-text-line">same prompt</div></user-query></div>';
+      const answer = '<model-response><message-content><div class="markdown" aria-busy="false">OLD ANSWER FROM A DIFFERENT CONVERSATION</div></message-content><div class="response-footer complete"></div></model-response>';
+      if (timing === "terminal confirmation") page.document.querySelector(".conversation-container").insertAdjacentHTML("beforeend", answer);
+      const navigate = () => {
+        page.context.window.location = new URL(destination);
+        if (timing !== "terminal confirmation") {
+          page.document.body.innerHTML = `<div class="conversation-container" id="historical"><user-query><div class="query-text-line">same prompt</div></user-query>${answer}</div>`;
+        }
+      };
+      if (timing === "before matching") navigate();
+      let now = Date.now();
+      let navigated = timing === "before matching";
+      page.context.Date = class extends Date { static now() { return now; } };
+      page.context.advanceTimer = async (ms) => {
+        now += ms;
+        if (!navigated && (timing !== "terminal confirmation" || ms === 750)) {
+          navigated = true;
+          navigate();
+        }
+      };
+      vm.runInContext("workerSleep = advanceTimer", page.context);
+      const events = [];
+      await assert.rejects(page.streamResponseSnapshots({ postMessage: (event) => events.push(event) },
+        44, 1, baseline, "same prompt", "|0", null, 20000), /Gemini.*conversation/i);
+      assert.ok(events.every((event) => event.type !== "terminal"));
+      assert.ok(events.every((event) => event.remoteChatUrl === origin));
+      if (timing !== "terminal confirmation") assert.ok(events.every((event) => !event.text?.includes("OLD ANSWER")));
+    });
+  }
+}
+
+test("Gemini tracker reports a conversation allocated during terminal confirmation", async () => {
+  const page = content("", "https://gemini.google.com/app");
+  const baseline = page.extractConversationTranscript();
+  page.document.body.innerHTML = '<div class="conversation-container" id="current"><user-query><div class="query-text-line">same prompt</div></user-query><model-response><message-content><div class="markdown" aria-busy="false">Current answer</div></message-content><div class="response-footer complete"></div></model-response></div>';
+  let now = Date.now();
+  page.context.Date = class extends Date { static now() { return now; } };
+  page.context.advanceTimer = async (ms) => {
+    now += ms;
+    if (ms === 750) page.context.window.location = new URL(chatUrl);
+  };
+  vm.runInContext("workerSleep = advanceTimer", page.context);
+  const events = [];
+  await page.streamResponseSnapshots({ postMessage: (event) => events.push(event) },
+    45, 1, baseline, "same prompt", "|0", null, 20000);
+  const terminal = events.find((event) => event.type === "terminal");
+  assert.equal(terminal?.completionReason, "settled");
+  assert.equal(terminal?.remoteChatUrl, chatUrl);
+  assert.equal(terminal?.remoteChatId, "d11114e59cd9e350");
+});
+
+test("Gemini tracker pins the first allocated conversation before a second navigation", async () => {
+  const page = content("", "https://gemini.google.com/app");
+  const baseline = page.extractConversationTranscript();
+  page.document.body.innerHTML = '<div class="conversation-container"><user-query><div class="query-text-line">same prompt</div></user-query></div>';
+  let now = Date.now();
+  let polls = 0;
+  page.context.Date = class extends Date { static now() { return now; } };
+  page.context.advanceTimer = async (ms) => {
+    now += ms;
+    page.context.window.location = new URL(++polls === 1
+      ? "https://gemini.google.com/app/1111111111111111"
+      : "https://gemini.google.com/app/2222222222222222");
+  };
+  vm.runInContext("workerSleep = advanceTimer", page.context);
+  const events = [];
+  await assert.rejects(page.streamResponseSnapshots({ postMessage: (event) => events.push(event) },
+    45, 1, baseline, "same prompt", "|0", null, 3000), /Gemini.*conversation/i);
+  assert.equal(polls, 2);
+  assert.ok(events.every((event) => event.type !== "terminal"));
+});
+
 test("Gemini replacement binding requires the baseline and one exact user with the requested attachments", () => {
   const page = content();
   assert.equal(typeof page.adapter.resolveReplacementUserTurn, "function");
   const prior = { messageKey: "prior:user", role: "user", text: "same prompt", attachments: ["test.pdf", "image"] };
   const priorAnswer = { messageKey: "prior:assistant", role: "assistant", text: "Wrong old answer" };
   const current = { messageKey: "current:user", role: "user", text: "same prompt", attachments: ["test.pdf", "image"] };
-  const baseline = { messages: [prior, priorAnswer] };
+  const baseline = { chatUrl, messages: [prior, priorAnswer] };
   const resolve = (messages, overrides = {}) => page.adapter.resolveReplacementUserTurn({
-    transcript: { messages }, baseline, promptText: "same prompt", expectedPdfFilename: "test.pdf", expectedImageCount: 1, ...overrides,
+    transcript: { chatUrl, messages }, baseline, expectedChatUrl: chatUrl, promptText: "same prompt", expectedPdfFilename: "test.pdf", expectedImageCount: 1, ...overrides,
   });
   assert.equal(resolve([prior, priorAnswer, current])?.messageKey, "current:user");
   assert.equal(resolve([prior, priorAnswer]), null);
@@ -543,5 +627,6 @@ test("Gemini replacement binding requires the baseline and one exact user with t
   assert.equal(resolve([prior, priorAnswer, { ...current, attachments: ["wrong-test.pdf", "image"] }]), null);
   assert.equal(resolve([prior, priorAnswer, { ...current, attachments: ["test.pdf"] }]), null);
   assert.equal(resolve([prior, priorAnswer, { ...current, text: "same prompt plus something" }]), null);
+  assert.equal(resolve([prior, priorAnswer, current], { transcript: { chatUrl: "https://gemini.google.com/app/2222222222222222", messages: [prior, priorAnswer, current] } }), null);
   assert.equal(resolve([{ ...current, attachments: [] }], { baseline: { messages: [] }, expectedPdfFilename: "", expectedImageCount: 0 })?.messageKey, "current:user");
 });
