@@ -367,21 +367,60 @@ test("Gemini production timer resolves when browser CSP forbids blob Workers", a
   assert.equal(workerAttempts, 0);
 });
 
-test("production worker timer resolves and releases resources after asynchronous worker failure", async () => {
-  const page = content("", "https://chatgpt.com/");
-  let terminated = 0;
+function workerTimerHarness(mode, hostname) {
+  const page = content("", `https://${hostname}/`);
+  const state = { terminated: 0, worker: null };
   const revoked = [];
+  const activeTimers = new Set();
+  const clearedTimers = [];
+  page.context.setTimeout = (callback, ms) => {
+    const id = setTimeout(() => { activeTimers.delete(id); callback(); }, ms);
+    activeTimers.add(id);
+    return id;
+  };
+  page.context.clearTimeout = (id) => {
+    clearedTimers.push(id);
+    activeTimers.delete(id);
+    clearTimeout(id);
+  };
   page.context.Blob = Blob;
   page.context.URL = { createObjectURL: () => "blob:failed", revokeObjectURL: (url) => revoked.push(url) };
   page.context.Worker = class {
-    constructor() { setTimeout(() => this.onerror?.({ preventDefault() {} }), 0); }
-    terminate() { terminated++; }
+    constructor() {
+      if (mode === "constructor-error") throw new Error("Worker startup blocked");
+      state.worker = this;
+      queueMicrotask(() => {
+        if (mode === "success") this.onmessage?.({ data: "done" });
+        else this.onerror?.({ preventDefault() {} });
+      });
+    }
+    terminate() { state.terminated++; }
   };
-  const result = await Promise.race([page.workerSleep(5).then(() => "resolved"), new Promise((resolve) => setTimeout(() => resolve("hung"), 100))]);
-  assert.equal(result, "resolved");
-  assert.equal(terminated, 1);
-  assert.deepEqual(revoked, ["blob:failed"]);
-});
+  return { page, state, revoked, activeTimers, clearedTimers };
+}
+
+for (const hostname of ["chatgpt.com", "chat.deepseek.com"]) {
+  for (const [mode, label] of [
+    ["success", "normal Worker completion"],
+    ["constructor-error", "Worker construction throws"],
+    ["async-error", "asynchronous Worker failure"],
+  ]) {
+    test(`${hostname} production worker timer resolves and cleans resources after ${label}`, { timeout: 500 }, async () => {
+      const h = workerTimerHarness(mode, hostname);
+      // Successful workers must cancel the still-pending native fallback; failed
+      // workers let it fire. Both leave no timer, handler, worker, or object URL.
+      await h.page.workerSleep(mode === "success" ? 200 : 5);
+      assert.equal(h.activeTimers.size, 0);
+      assert.equal(h.clearedTimers.length, 1);
+      assert.equal(h.state.terminated, mode === "constructor-error" ? 0 : 1);
+      assert.deepEqual(h.revoked, ["blob:failed"]);
+      if (h.state.worker) {
+        assert.equal(h.state.worker.onmessage, null);
+        assert.equal(h.state.worker.onerror, null);
+      }
+    });
+  }
+}
 
 test("Gemini submitted PDF filenames must match completely without legacy suffix or duplicate-name matching", () => {
   const page = content();
