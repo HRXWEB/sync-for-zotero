@@ -321,9 +321,10 @@
     const supportedDeliveryContracts = probeAlive
       ? capabilityProbe.supportedDeliveryContracts
       : health?.supportedDeliveryContracts;
+    const gemini = (health?.siteId || targetSiteId) === "gemini";
     return {
       chatTabAlive: Boolean(chatTabAlive),
-      chatUrl: chatUrl || null,
+      chatUrl: (gemini ? normalizeGeminiConversationUrl(chatUrl) : chatUrl) || chatUrl || null,
       siteId: health?.siteId || targetSiteId || null,
       url: health?.url || chatUrl || null,
       contentScriptAlive: probeAlive || healthAlive,
@@ -332,6 +333,10 @@
       sendControlState: health?.sendControlState || null,
       uploadControlFound: health?.uploadControlFound === true,
       networkHookActive: health?.networkHookActive === true,
+      supportedTargets: Array.isArray(health?.supportedTargets)
+        ? health.supportedTargets
+        : (Array.isArray(capabilityProbe?.supportedTargets) ? capabilityProbe.supportedTargets : []),
+      answerCapture: health?.answerCapture || capabilityProbe?.answerCapture || "network",
       supportedDeliveryContracts: Array.isArray(
         supportedDeliveryContracts,
       )
@@ -909,6 +914,8 @@
 
     try {
       const parsed = new URL(raw);
+      const geminiUrl = normalizeGeminiConversationUrl(raw);
+      if (geminiUrl) return geminiUrl;
       if (parsed.hostname.toLowerCase() === "chatgpt.com") {
         const match = parsed.pathname.match(/^\/c\/([^/?#]+)/);
         if (match) return `${parsed.origin}/c/${match[1]}`;
@@ -916,6 +923,60 @@
     } catch (_) {}
 
     return raw.replace(/\/+$/, "");
+  }
+
+  function normalizeGeminiConversationUrl(url) {
+    try {
+      const parsed = new URL(String(url || ""));
+      if (parsed.origin !== "https://gemini.google.com" || parsed.username || parsed.password) return null;
+      const match = parsed.pathname.match(/^\/app\/([a-f0-9]{16})\/?$/);
+      return match ? `https://gemini.google.com/app/${match[1]}` : null;
+    } catch (_) { return null; }
+  }
+
+  function resolveExpectedConversationBinding(query, target) {
+    const rawUrl = query.expected_chat_url;
+    const rawId = query.expected_chat_id;
+    const hasUrl = rawUrl !== undefined && rawUrl !== null;
+    const hasId = rawId !== undefined && rawId !== null;
+    let chatUrl = null;
+    let chatId = null;
+    if (target === "gemini") {
+      if (hasUrl) {
+        chatUrl = typeof rawUrl === "string" ? normalizeGeminiConversationUrl(rawUrl) : null;
+        if (!chatUrl) throw new Error("Invalid expected Gemini conversation binding URL.");
+        chatId = chatUrl.split("/").pop();
+      }
+      if (hasId) {
+        if (typeof rawId !== "string" || !/^[a-f0-9]{16}$/.test(rawId) || (chatId && chatId !== rawId)) {
+          throw new Error("Expected Gemini conversation binding ID does not match.");
+        }
+        chatId = rawId;
+        chatUrl = `https://gemini.google.com/app/${chatId}`;
+      }
+    } else if (hasUrl || hasId) {
+      const config = target === "chatgpt"
+        ? { origin: "https://chatgpt.com", path: /^\/c\/([^/?#]+)\/?$/ }
+        : { origin: "https://chat.deepseek.com", path: /^\/a\/chat\/s\/([^/?#]+)\/?$/ };
+      if (hasUrl) {
+        let parsed;
+        try { parsed = new URL(rawUrl); } catch (_) {}
+        const match = parsed?.pathname.match(config.path);
+        if (typeof rawUrl !== "string" || parsed?.origin !== config.origin || !match || parsed.username || parsed.password) {
+          throw new Error("Invalid expected conversation binding URL.");
+        }
+        chatUrl = `${config.origin}${parsed.pathname.replace(/\/$/, "")}`;
+        chatId = match[1];
+      }
+      if (hasId && (typeof rawId !== "string" || !rawId || /[/?#\s]/.test(rawId) || (chatId && rawId !== chatId))) {
+        throw new Error("Expected conversation binding ID does not match.");
+      }
+      if (hasId && !chatId) {
+        chatId = rawId;
+        chatUrl = `${config.origin}${target === "chatgpt" ? "/c/" : "/a/chat/s/"}${chatId}`;
+      }
+    }
+    return query.force_new_chat === true ? { chatUrl: null, chatId: null } : { chatUrl, chatId };
   }
 
   function conversationUrlsMatch(actualUrl, expectedUrl) {
@@ -1509,6 +1570,8 @@
     isRetrySafeContentScriptMessage,
     normalizeComposerText,
     normalizeConversationUrl,
+    normalizeGeminiConversationUrl,
+    resolveExpectedConversationBinding,
     postPhaseAndWaitForAck,
     retryRecoverableContentScriptMessage,
     stopDisconnectedProviderAttempt,

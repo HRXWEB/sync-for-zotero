@@ -909,6 +909,9 @@ globalThis.__syncZoteroWebchatDebug = {
 // ---------------------------------------------------------------------------
 
 const SITE_ADAPTERS = {
+  "gemini.google.com": globalThis.SyncZoteroGemini?.createAdapter({
+    document, isVisibleElement, htmlToMarkdown, shared,
+  }),
   "chatgpt.com": {
     siteId: "chatgpt",
     homeUrl: "https://chatgpt.com/",
@@ -1497,6 +1500,11 @@ async function attachImages(imageDataUrls) {
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const file = new File([bytes], `screenshot.${ext}`, { type: mime });
 
+    if (SITE_ADAPTER?.uploadFile) {
+      await SITE_ADAPTER.uploadFile(file);
+      continue;
+    }
+
     const dt = new DataTransfer();
     dt.items.add(file);
 
@@ -1748,6 +1756,9 @@ function collectComposerFileCardNodes() {
 }
 
 function collectVisibleComposerPdfCardEvidence() {
+  if (SITE_ADAPTER?.getComposerAttachments) {
+    return SITE_ADAPTER.getComposerAttachments().map((card) => card.filename);
+  }
   const messageSelector =
     SITE_ADAPTER?.conversationMessageSelector ||
     "[data-message-author-role]";
@@ -1797,6 +1808,8 @@ async function attachPDF(pdfBase64, pdfFilename) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   const file = new File([bytes], pdfFilename, { type: "application/pdf" });
+
+  if (SITE_ADAPTER?.uploadFile) return SITE_ADAPTER.uploadFile(file);
 
   const dt = new DataTransfer();
   dt.items.add(file);
@@ -2424,7 +2437,22 @@ function assertPipelineCurrent(isPipelineCurrent) {
 async function submitMessageAndVerify(
   promptText,
   isPipelineCurrent = () => true,
+  beforeSubmit = () => {},
 ) {
+  if (SITE_ADAPTER?.siteId === "gemini") {
+    const sendBtn = await waitForSendButtonEnabled(30000);
+    if (!sendBtn) throw new Error("Gemini Send control is not enabled.");
+    const baselineTranscriptCount = extractConversationTranscript().count;
+    const baselineUserMessageCount = getUserMessageCount();
+    const baselineOutboundRequestSerial = outboundRequestSerial;
+    assertPipelineCurrent(isPipelineCurrent);
+    beforeSubmit();
+    sendBtn.click();
+    const delivered = await waitForSubmissionSignal(promptText, baselineOutboundRequestSerial, baselineUserMessageCount, baselineTranscriptCount);
+    assertPipelineCurrent(isPipelineCurrent);
+    if (!delivered.delivered) throw new Error("Gemini prompt delivery could not be verified; inspect the conversation before retrying.");
+    return { baselineOutboundRequestSerial, clickAttempts: 1, requestObserved: false, streamObserved: false, requestContext: null };
+  }
   if (SITE_ADAPTER?.siteId === "deepseek") {
     return submitDeepSeekMessageAndVerify(promptText, isPipelineCurrent);
   }
@@ -2842,6 +2870,7 @@ function looksLikeRedCancelButton(el) {
 }
 
 function findStopButton() {
+  if (SITE_ADAPTER?.findStopButton) return SITE_ADAPTER.findStopButton();
   for (const sel of STOP_SELECTORS) {
     const el = document.querySelector(sel);
     if (el && isVisibleElement(el)) return el;
@@ -2908,7 +2937,8 @@ function isConversationStillRunning(
  * positive completion signal, unlike the stop button which is a negative signal.
  * Returns true if the action bar is visible on the last assistant message.
  */
-function hasResponseActionBar() {
+function hasResponseActionBar(assistantTurnKey = null) {
+  if (SITE_ADAPTER?.isResponseComplete) return SITE_ADAPTER.isResponseComplete(assistantTurnKey);
   // Get the last visible assistant message container. ChatGPT can leave stale
   // conversation trees mounted while rendering a new-chat shell.
   const assistantMessages = getAssistantMessageNodes();
@@ -3248,7 +3278,7 @@ async function streamResponseSnapshots(
     const nowMs = Date.now();
     const stopBtn = findStopButton();
     const busyComposer = hasBusyComposerHint();
-    const actionBarVisible = hasResponseActionBar();
+    const actionBarVisible = hasResponseActionBar(assistantTurnKey);
     const strongTransportCompletion =
       shared.hasStrongTransportCompletionSignal({
         sseDone,
@@ -3415,7 +3445,7 @@ async function streamResponseSnapshots(
       const attachments = Array.isArray(matchedUserTurn.attachments)
         ? matchedUserTurn.attachments
         : [];
-      const contract = shared.classifySubmittedPdfContract(
+      const contract = (SITE_ADAPTER?.classifySubmittedAttachments || shared.classifySubmittedPdfContract)(
         attachments,
         expectedPdfFilename,
       );
@@ -4230,6 +4260,7 @@ function extractDeepSeekAssistantAnswerText(node) {
 }
 
 function extractAssistantAnswerText(node) {
+  if (SITE_ADAPTER?.extractAssistantAnswerText) return SITE_ADAPTER.extractAssistantAnswerText(node);
   if (SITE_ADAPTER?.siteId === "deepseek") {
     return extractDeepSeekAssistantAnswerText(node);
   }
@@ -4276,6 +4307,7 @@ function pruneAssistantStatusNodes(root) {
 }
 
 function extractAssistantThinkingText(node) {
+  if (SITE_ADAPTER?.extractAssistantThinkingText) return SITE_ADAPTER.extractAssistantThinkingText(node);
   if (SITE_ADAPTER?.siteId === "deepseek") {
     const sections = extractDeepSeekAssistantSections(node);
     if (sections?.hasStructuredSplit && sections.thinking) {
@@ -4374,7 +4406,9 @@ function simpleHash(text) {
 }
 
 function getCurrentChatUrl() {
-  return window.location.href;
+  return SITE_ADAPTER?.siteId === "gemini"
+    ? shared.normalizeGeminiConversationUrl(window.location.href) || window.location.href
+    : window.location.href;
 }
 
 function getCurrentChatId(url = getCurrentChatUrl()) {
@@ -4643,6 +4677,7 @@ function removeTransientMessageNodes(root) {
 }
 
 function extractAttachmentNames(node) {
+  if (SITE_ADAPTER?.extractAttachmentNames) return SITE_ADAPTER.extractAttachmentNames(node);
   if (!node) return [];
   // File/document attachment selectors
   const fileSelectors = [
@@ -4716,6 +4751,7 @@ function extractAttachmentNames(node) {
 }
 
 function extractUserMessageText(node) {
+  if (SITE_ADAPTER?.extractUserMessageText) return SITE_ADAPTER.extractUserMessageText(node);
   if (!node) return "";
   const root = node.cloneNode(true);
   removeTransientMessageNodes(root);
@@ -4744,6 +4780,7 @@ function getConversationMessageNodes() {
 
 function buildTranscriptMessageKey(node, role, index, text, attachments = []) {
   const explicit =
+    SITE_ADAPTER?.getMessageId?.(node) ||
     node.getAttribute?.("data-message-id") ||
     node.id ||
     null;
@@ -5678,20 +5715,23 @@ async function scrapeAllMessages(options = {}) {
 // ---------------------------------------------------------------------------
 
 async function collectHealthStatus() {
-  const hookResponded = await requestMainWorldHealth();
+  const domCapture = SITE_ADAPTER?.answerCapture === "dom";
+  const hookResponded = domCapture ? false : await requestMainWorldHealth();
   const composer = findComposerNow();
   const sendBtn = findSendButton(composer);
-  const uploadControl = document.querySelector('input[type="file"]');
+  const uploadControl = SITE_ADAPTER?.findUploadControl?.() || document.querySelector('input[type="file"]');
   return {
     ok: true,
     contentScriptAlive: true,
     siteId: SITE_ADAPTER?.siteId || null,
-    url: window.location.href,
-    mainWorldInjected: mainWorldInjected || hookResponded,
+    url: getCurrentChatUrl(),
+    mainWorldInjected: !domCapture && (mainWorldInjected || hookResponded),
     composerFound: Boolean(composer),
     sendControlState: describeSubmitControl(sendBtn),
     uploadControlFound: Boolean(uploadControl),
-    networkHookActive: networkHookActive || hookResponded,
+    networkHookActive: !domCapture && (networkHookActive || hookResponded),
+    supportedTargets: ["chatgpt", "deepseek", "gemini"],
+    answerCapture: domCapture ? "dom" : "network",
     supportedDeliveryContracts: [...SUPPORTED_DELIVERY_CONTRACTS],
     lastRequestAt: lastRequestAt || null,
     lastStreamAt: lastStreamAt || null,
@@ -5703,6 +5743,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "PING") {
     sendResponse({
       pong: true,
+      supportedTargets: ["chatgpt", "deepseek", "gemini"],
+      answerCapture: SITE_ADAPTER?.answerCapture || "network",
       supportedDeliveryContracts: [...SUPPORTED_DELIVERY_CONTRACTS],
     });
     return false;
@@ -5838,6 +5880,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 let _syncZoteroPort = null;
 let _syncZoteroAttemptToken = null;
 
+function assertSubmissionConversation(message) {
+  if (!SITE_ADAPTER) throw new Error("Unsupported WebChat site.");
+  if (message.expectedChatUrl && !shared.conversationUrlsMatch(getCurrentChatUrl(), message.expectedChatUrl)) {
+    throw new Error("The current conversation does not match the expected conversation binding.");
+  }
+  if (SITE_ADAPTER.siteId === "gemini") {
+    const url = new URL(window.location.href);
+    const home = url.origin === "https://gemini.google.com" && /^\/app\/?$/.test(url.pathname) && !url.username && !url.password;
+    if (!home && !shared.normalizeGeminiConversationUrl(url.href)) throw new Error("Invalid Gemini conversation URL.");
+    if (message.forceNewChat && (!home || extractConversationTranscript().count > 0)) {
+      throw new Error("Gemini did not confirm a fresh empty conversation.");
+    }
+  }
+}
+
 function clearSyncZoteroAttemptToken(attemptToken) {
   if (_syncZoteroAttemptToken === attemptToken) {
     _syncZoteroAttemptToken = null;
@@ -5931,6 +5988,7 @@ if (!window.__syncZoteroListenerRegistered) {
             ),
           );
         }
+        assertSubmissionConversation(msg);
         const baselineTranscript = extractConversationTranscript();
         const attachmentFingerprint = [
           msg.pdfFilename || "",
@@ -5961,13 +6019,14 @@ if (!window.__syncZoteroListenerRegistered) {
             await attachImages(msg.images);
             uploadDetected = true;
           } catch (imgErr) {
+            if (SITE_ADAPTER?.siteId === "gemini") throw imgErr;
             console.warn("[sync-zotero] Image attachment failed:", imgErr);
           }
         }
         // Mode switching disabled — users control thinking mode directly on chatgpt.com
         await typePromptAndVerify(msg.prompt, {
           requireEnabledSendControl:
-            SITE_ADAPTER?.siteId === "chatgpt",
+            SITE_ADAPTER?.siteId === "chatgpt" || SITE_ADAPTER?.siteId === "gemini",
         });
         assertPipelineCurrent(isPipelineCurrent);
         composerTextMatched = true;
@@ -6024,10 +6083,12 @@ if (!window.__syncZoteroListenerRegistered) {
         // The durable submit-start acknowledgement is the boundary after which
         // the website may start generating. An unexpected disconnect must
         // retain this exact attempt long enough to stop that provider run.
+        assertSubmissionConversation(msg);
         portProviderMayBeRunning = true;
         const submission = await submitMessageAndVerify(
           msg.prompt,
           isPipelineCurrent,
+          () => assertSubmissionConversation(msg),
         );
         clickAttempts = Number(submission?.clickAttempts) || clickAttempts;
         port.postMessage({
@@ -6388,6 +6449,7 @@ async function _doScrapeHistory(options = {}) {
 }
 
 function shouldAutoScrapeHistory() {
+  if (SITE_ADAPTER?.siteId === "gemini") return false;
   if (SITE_ADAPTER?.siteId !== "deepseek") return true;
   return !getCurrentChatId();
 }

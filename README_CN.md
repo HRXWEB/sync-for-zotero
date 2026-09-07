@@ -1,6 +1,6 @@
 # Sync for Zotero
 
-一个 Chromium 扩展，作为 [LLM for Zotero](https://github.com/yilewang/llm-for-zotero) 插件的 **网页聊天桥接工具**。它通过浏览器将 Zotero 连接到 ChatGPT 或 DeepSeek：上传 PDF 和图片、发送提示词、同步聊天操作，并将 Markdown 格式的结果返回给 Zotero。
+一个 Chromium 扩展，作为 [LLM for Zotero](https://github.com/yilewang/llm-for-zotero) 插件的 **网页聊天桥接工具**。它通过浏览器将 Zotero 连接到 ChatGPT、DeepSeek 或 Google Gemini：上传 PDF 和图片、发送提示词、同步聊天操作，并将 Markdown 格式的结果返回给 Zotero。
 
 > **本扩展不是独立工具。** 需要配合 LLM for Zotero 插件（v3.7.17 或更高版本），并在插件设置中选择 **webchat 模式**。
 
@@ -15,7 +15,7 @@
 
 - 安装了 [Zotero](https://www.zotero.org/) 及 **[LLM for Zotero](https://github.com/yilewang/llm-for-zotero) 插件 v3.7.17+**
 - 在 LLM for Zotero 设置中，将模式设置为 **webchat**
-- 一个 ChatGPT 或 DeepSeek 账号，取决于你在 LLM for Zotero 中选择的网页聊天目标
+- 一个 ChatGPT、DeepSeek 或 Google Gemini 账号，取决于你在 LLM for Zotero 中选择的网页聊天目标
 
 ## 安装
 
@@ -56,9 +56,13 @@
 ## 使用方法
 
 1. 确保 Zotero 正在运行，且 LLM for Zotero 已激活（webchat 模式）
-2. 在浏览器中打开 ChatGPT 或 DeepSeek 标签页
+2. 在浏览器中打开 ChatGPT、DeepSeek 或 Google Gemini 标签页
 3. 点击扩展图标，确认连接状态
 4. 从 Zotero 发送查询 — 扩展会自动完成其余工作
+
+使用 Gemini 时，需要配套的 LLM for Zotero 版本提供 `gemini.google.com` WebChat 模型，并先在 `https://gemini.google.com/app` 登录。请自行在 Gemini 页面选择模型；扩展不会切换模型。Gemini 的回答从页面 DOM 提取，历史记录按请求读取，页面必须具备可用的输入框。
+
+Gemini 每次请求支持一个 PDF，也可同时附加图片。扩展等待上传预览就绪，并验证已发送用户消息中的 PDF。输入框有残留附件时会阻止发送，请先移除附件。追问会确认已保存的会话地址；若发送结果无法确认，请先查看 Gemini 会话再重试，避免重复提问。Gemini DOM 结构变化可能需要更新适配器。
 
 ## 浏览器兼容性
 

@@ -179,6 +179,13 @@ const WEBCHAT_DEBUG = false;
 // ---------------------------------------------------------------------------
 
 const SITE_CONFIGS = {
+  gemini: {
+    siteId: "gemini", label: "Google Gemini",
+    homeUrl: "https://gemini.google.com/app",
+    urlPattern: "https://gemini.google.com/*",
+    urlPrefix: "https://gemini.google.com",
+    conversationUrlPattern: /^https:\/\/gemini\.google\.com\/app\/[a-f0-9]{16}\/?(?:[?#].*)?$/,
+  },
   chatgpt: {
     siteId: "chatgpt",
     label: "ChatGPT",
@@ -199,16 +206,21 @@ const SITE_CONFIGS = {
 
 const ALL_SITE_URL_PATTERNS = Object.values(SITE_CONFIGS).map(s => s.urlPattern);
 
-/** Get site config from a target ID (e.g., "chatgpt", "deepseek"). Defaults to chatgpt. */
+/** Unknown targets must never route a prompt to another provider. */
 function getSiteConfig(target) {
-  return SITE_CONFIGS[target] || SITE_CONFIGS.chatgpt;
+  if (!Object.hasOwn(SITE_CONFIGS, target)) throw new Error(`Unsupported WebChat target: ${target}`);
+  return SITE_CONFIGS[target];
 }
 
 /** Determine which site config a URL belongs to. */
 function getSiteConfigByUrl(url) {
-  for (const config of Object.values(SITE_CONFIGS)) {
-    if (url?.startsWith(config.urlPrefix)) return config;
-  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) return null;
+    for (const config of Object.values(SITE_CONFIGS)) {
+      if (parsed.origin === config.urlPrefix) return config;
+    }
+  } catch (_) {}
   return null;
 }
 
@@ -1149,16 +1161,17 @@ async function runPipeline(query) {
 
   // Determine which site to use from the query target (defaults to active/chatgpt)
   const queryTarget = query.target || activeTarget || "chatgpt";
-  activeTarget = queryTarget;
-  const siteConfig = getSiteConfig(queryTarget);
-  const siteLabel = getSiteConfig(queryTarget).label || "Chat";
-
-  broadcastStatus("running", isFollowup
-    ? (query.pdf_base64 ? `Attaching PDF to conversation…` : `Sending follow-up to ${siteLabel}…`)
-    : (query.pdf_base64 ? `Starting fresh chat with PDF: ${query.pdf_filename}…` : `Starting fresh ${siteLabel} chat…`)
-  );
-
   try {
+    const siteConfig = getSiteConfig(queryTarget);
+    const siteLabel = siteConfig.label;
+    const expectedBinding = shared.resolveExpectedConversationBinding(query, queryTarget);
+    activeTarget = queryTarget;
+
+    broadcastStatus("running", isFollowup
+      ? (query.pdf_base64 ? `Attaching PDF to conversation…` : `Sending follow-up to ${siteLabel}…`)
+      : (query.pdf_base64 ? `Starting fresh chat with PDF: ${query.pdf_filename}…` : `Starting fresh ${siteLabel} chat…`)
+    );
+
     // ── Delivery-contract gate ─────────────────────────────────────
     // Decided once here, before any tab work, so a mismatched
     // extension/plugin pair fails with the update remedy instead of a
@@ -1200,7 +1213,7 @@ async function runPipeline(query) {
     if (activeChatTabId !== null) {
       try {
         const existing = await chrome.tabs.get(activeChatTabId);
-        if (existing?.url?.startsWith(siteConfig.urlPrefix)) {
+        if (getSiteConfigByUrl(existing?.url)?.siteId === siteConfig.siteId) {
           tab = existing;
         }
       } catch (_) {
@@ -1220,7 +1233,13 @@ async function runPipeline(query) {
 
     const shouldNavigateFresh = startsFresh;
 
-    if (shouldNavigateFresh) {
+    if (shouldNavigateFresh && queryTarget === "gemini") {
+      // Reload even a home shell: a draft/stale transcript must not leak into
+      // a force-new-chat request.
+      await chrome.tabs.update(tab.id, { url: siteConfig.homeUrl });
+      await waitForTabLoad(tab.id);
+      tab = await chrome.tabs.get(tab.id);
+    } else if (shouldNavigateFresh) {
       // Skip navigation if tab is already on the site's home/new-chat URL
       const currentUrl = tab.url || "";
       const isAlreadyHome = (
@@ -1229,11 +1248,14 @@ async function runPipeline(query) {
         currentUrl === siteConfig.urlPrefix
       );
       if (!isAlreadyHome) {
-        try {
-          await chrome.tabs.update(tab.id, { url: siteConfig.homeUrl });
-          await waitForTabLoad(tab.id);
-        } catch (_) {}
+        await chrome.tabs.update(tab.id, { url: siteConfig.homeUrl });
+        await waitForTabLoad(tab.id);
+        tab = await chrome.tabs.get(tab.id);
       }
+    } else if (expectedBinding.chatUrl && !shared.conversationUrlsMatch(tab.url, expectedBinding.chatUrl)) {
+      await chrome.tabs.update(tab.id, { url: expectedBinding.chatUrl });
+      await waitForTabLoad(tab.id);
+      tab = await chrome.tabs.get(tab.id);
     }
 
     // ── Ensure content script is ready ────────────────────────────
@@ -1246,9 +1268,17 @@ async function runPipeline(query) {
 
     const readyState = await publishReadyConversationState(
       tab.id,
-      shouldNavigateFresh ? null : (tab.url || null),
+      shouldNavigateFresh ? siteConfig.homeUrl : (expectedBinding.chatUrl || tab.url || null),
       { submitScraped: false },
     );
+
+    if (expectedBinding.chatUrl && !shared.conversationUrlsMatch(readyState?.chatUrl, expectedBinding.chatUrl)) {
+      throw new Error("The ready conversation does not match the expected conversation binding.");
+    }
+    if (shouldNavigateFresh && queryTarget === "gemini" &&
+        (!isSiteHomeUrl(readyState?.chatUrl, siteConfig) || Number(readyState?.transcriptCount || 0) > 0 || readyState?.messages?.length > 0)) {
+      throw new Error("Gemini did not confirm a fresh empty conversation.");
+    }
 
     broadcastStatus(
       "running",
@@ -1289,6 +1319,8 @@ async function runPipeline(query) {
       images:       query.images || null,
       chatgptMode:  query.chatgpt_mode || null,
       deliveryContractVersion: query.delivery_contract_version,
+      expectedChatUrl: expectedBinding.chatUrl || (shouldNavigateFresh ? siteConfig.homeUrl : null),
+      forceNewChat: shouldNavigateFresh,
       seq,
       attempt,
     });
@@ -1843,6 +1875,10 @@ async function reloadTab(tabId) {
 }
 
 async function ensureContentScript(tabId, requiredDeliveryContractVersion) {
+  const tab = await chrome.tabs.get(tabId);
+  const siteConfig = getSiteConfigByUrl(tab.url);
+  if (!siteConfig) throw new Error("Unsupported WebChat tab URL.");
+  const domCapture = siteConfig.siteId === "gemini";
   const pingContentScript = () =>
     new Promise((resolve) => {
       chrome.tabs.sendMessage(tabId, { type: "PING" }, (res) => {
@@ -1850,11 +1886,12 @@ async function ensureContentScript(tabId, requiredDeliveryContractVersion) {
       });
     });
   const hasRequiredContract = (health) =>
-    shared.contentScriptMeetsDeliveryContractRequirement(
+    (!domCapture || (health?.answerCapture === "dom" && health?.supportedTargets?.includes("gemini"))) && shared.contentScriptMeetsDeliveryContractRequirement(
       health,
       requiredDeliveryContractVersion,
     );
   const injectMainWorld = async () => {
+    if (domCapture) return;
     try {
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -1864,7 +1901,7 @@ async function ensureContentScript(tabId, requiredDeliveryContractVersion) {
     } catch (_) {}
   };
 
-  // Always inject the MAIN world script (SSE interceptor).
+  // Network-backed providers require the MAIN world SSE interceptor.
   // It has its own __syncZoteroFetchPatched guard to avoid double-patching,
   // but after full page reloads the guard resets and re-injection is needed.
   await injectMainWorld();
@@ -1888,7 +1925,7 @@ async function ensureContentScript(tabId, requiredDeliveryContractVersion) {
   // stale after an extension reload.
   await chrome.scripting.executeScript({
     target: { tabId },
-    files:  ["webchat_shared.js", "content_script.js"],
+    files:  ["webchat_shared.js", "gemini_adapter.js", "content_script.js"],
   });
 
   // Poll briefly instead of always paying a fixed 1s delay after injection.

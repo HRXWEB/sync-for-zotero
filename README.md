@@ -2,7 +2,7 @@
 
 [中文说明](README_CN.md)
 
-A Chromium extension that works as the **webchat bridge** for the [LLM for Zotero](https://github.com/yilewang/llm-for-zotero) plugin. It connects Zotero to ChatGPT or DeepSeek via the browser: uploading PDFs and images, running prompts, syncing chat actions, and returning markdown results back to Zotero.
+A Chromium extension that works as the **webchat bridge** for the [LLM for Zotero](https://github.com/yilewang/llm-for-zotero) plugin. It connects Zotero to ChatGPT, DeepSeek, or Google Gemini via the browser: uploading PDFs and images, running prompts, syncing chat actions, and returning markdown results back to Zotero.
 
 > **This extension is not a standalone tool.** It requires the LLM for Zotero plugin (v3.7.17 or later) with **webchat mode** selected in the plugin preferences.
 
@@ -17,7 +17,7 @@ A Chromium extension that works as the **webchat bridge** for the [LLM for Zoter
 
 - [Zotero](https://www.zotero.org/) with the **[LLM for Zotero](https://github.com/yilewang/llm-for-zotero) plugin v3.7.17+** installed
 - In LLM for Zotero preferences, set the mode to **webchat**
-- A ChatGPT or DeepSeek account, depending on the webchat target selected in LLM for Zotero
+- A ChatGPT, DeepSeek, or Google Gemini account, depending on the webchat target selected in LLM for Zotero
 
 ## Installation
 
@@ -58,9 +58,13 @@ When a new version is available, choose one of the following methods depending o
 ## Usage
 
 1. Make sure Zotero is running with LLM for Zotero active (webchat mode)
-2. Open ChatGPT or DeepSeek in a browser tab
+2. Open ChatGPT, DeepSeek, or Google Gemini in a browser tab
 3. Click the extension icon to verify connection status
 4. Send queries from Zotero — the extension handles the rest
+
+For Gemini, use a paired LLM for Zotero build that offers `gemini.google.com` as a WebChat model, and sign in at `https://gemini.google.com/app`. Choose the model in Gemini yourself; the bridge does not change it. Gemini answers and history are read from the page DOM, and readiness requires a usable composer. History is collected when requested.
+
+Gemini uploads one PDF per request and can also attach images. The bridge waits for the upload preview to settle and verifies the PDF on the submitted user turn. A composer with leftover attachments blocks the next request; remove those attachments and retry. Follow-ups confirm the saved conversation URL before sending. If a send cannot be verified, inspect Gemini before retrying to avoid duplicating a prompt. Gemini DOM changes may require an adapter update; its support does not use a network interceptor.
 
 ## Releasing (maintainers)
 
