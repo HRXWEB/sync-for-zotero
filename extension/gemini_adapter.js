@@ -10,10 +10,24 @@
         return button && isVisibleElement(button) ? button : null;
       };
       const messageRole = (node) => node?.localName === "user-query" ? "user" : node?.localName === "model-response" ? "assistant" : null;
+      const turnIdentities = new WeakMap();
+      const permanentTurnIdentities = new Map();
+      let provisionalTurnSerial = 0;
       const messageId = (node) => {
-        const id = node?.closest(".conversation-container[id]")?.id;
+        const turn = node?.closest(".conversation-container");
         const role = messageRole(node);
-        return id && role ? `${id}:${role}` : null;
+        if (!turn || !role) return null;
+        // Gemini exposes a user turn before assigning its permanent ID. Keep
+        // the first node identity for that turn, then remember its eventual ID
+        // so replacing the DOM node cannot invalidate an in-flight binding.
+        let identity = turnIdentities.get(turn);
+        if (!identity) {
+          identity = permanentTurnIdentities.get(turn.id) || turn.id ||
+            `gemini-provisional-turn-${++provisionalTurnSerial}`;
+          turnIdentities.set(turn, identity);
+        }
+        if (turn.id) permanentTurnIdentities.set(turn.id, identity);
+        return `${identity}:${role}`;
       };
       const clean = (node) => {
         const clone = node.cloneNode(true);
@@ -25,6 +39,8 @@
         const suffix = String(extension || "").trim().toLowerCase();
         return suffix && !stem.toLowerCase().endsWith(`.${suffix}`) ? `${stem}.${suffix}` : stem;
       };
+      const normalizePdfFilename = (name) => String(name || "")
+        .normalize("NFC").trim().replace(/\.pdf$/i, ".pdf");
       const getComposerAttachments = () => Array.from(inputRoot()?.querySelectorAll("uploader-file-preview") || [])
         .filter(isVisibleElement)
         .map((node) => {
@@ -72,9 +88,8 @@
           const contract = shared.classifySubmittedPdfContract(attachments, expectedFilename);
           // Gemini exposes the complete filename stem and extension separately.
           // Its receipt must not inherit legacy substring/elision/rename matches.
-          const normalizeFilename = (name) => String(name || "").normalize("NFC").trim();
           const filenameMatched = expectedFilename
-            ? attachments.some((name) => normalizeFilename(name) === normalizeFilename(expectedFilename))
+            ? attachments.some((name) => normalizePdfFilename(name) === normalizePdfFilename(expectedFilename))
             : null;
           return { ...contract, filenameMatched, contractVerified: expectedFilename
             ? contract.pdfAttachmentCount === 1 && filenameMatched === true
@@ -103,7 +118,7 @@
             const cards = getComposerAttachments().filter((card) => !baseline.has(card.node));
             const matching = cards.filter((card) => file.type.startsWith("image/")
               ? card.kind === "image"
-              : card.kind === "file" && card.filename.normalize("NFC") === file.name.normalize("NFC"));
+              : card.kind === "file" && normalizePdfFilename(card.filename) === normalizePdfFilename(file.name));
             if (matching.length === 1 && cards.length === 1 && matching[0].ready) {
               if (readySince === null) readySince = now();
               if (now() - readySince >= 750) {

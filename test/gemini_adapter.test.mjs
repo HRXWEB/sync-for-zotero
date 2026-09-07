@@ -440,3 +440,84 @@ test("Gemini readiness completes using production timers under blocked-worker CS
   assert.equal(ready.ok, true);
   assert.equal(ready.ready, true);
 });
+
+test("Gemini PDF receipts normalize only the extension case and retain complete basename equality", () => {
+  const page = content();
+  assert.equal(page.adapter.classifySubmittedAttachments(["test.pdf"], "test.PDF").contractVerified, true);
+  assert.equal(page.adapter.classifySubmittedAttachments(["test.PDF"], "test.pdf").contractVerified, true);
+  for (const name of ["wrong-test.pdf", "test (2).pdf", "Test.pdf"]) {
+    assert.equal(page.adapter.classifySubmittedAttachments([name], "test.PDF").contractVerified, false, name);
+  }
+});
+
+test("Gemini upload readiness accepts an uppercase PDF extension", async () => {
+  const page = content('<input-container></input-container><images-files-uploader><input type="file"></images-files-uploader>');
+  let now = 0;
+  page.context.DataTransfer = class {
+    constructor() { this.files = []; this.items = { add: (file) => this.files.push(file) }; }
+  };
+  page.document.querySelector("input[type=file]").addEventListener("change", () => {
+    const observed = parseHTML(read("fixtures/gemini-upload-ready.html")).document.querySelector("input-container");
+    page.document.querySelector("input-container").innerHTML = observed.innerHTML;
+  });
+  const receipt = await page.adapter.uploadFile(new File(["PDF"], "gemini-proof.PDF", { type: "application/pdf" }), {
+    now: () => now, wait: async (ms) => { now += ms; }, timeoutMs: 1500,
+  });
+  assert.equal(receipt.filenameConfirmed, true);
+  assert.equal(receipt.readyConfirmed, true);
+});
+
+test("observed mixed Gemini user turn identifies the actual PDF and uploaded image", () => {
+  const page = content(`<div class="conversation-container" id="mixed">${read("fixtures/gemini-mixed-turn.html")}</div>`);
+  const [message] = page.extractConversationTranscript().messages;
+  assert.deepEqual(Array.from(message.attachments), ["gemini-live-proof.pdf", "image"]);
+  assert.ok(page.document.querySelector('user-query-file-preview img[data-test-id="uploaded-img"]'));
+});
+
+for (const followup of [false, true]) {
+  test(`Gemini production tracker preserves ${followup ? "follow-up" : "fresh"} user binding across late ID allocation`, async () => {
+    const allocatedChatUrl = followup ? chatUrl : "https://gemini.google.com/app/44353066e9854a0f";
+    const oldTurn = '<div class="conversation-container" id="prior"><user-query><div class="query-text-line">Read the attached test PDF. Reply with its marker and method name only.</div></user-query><model-response><message-content><div class="markdown" aria-busy="false">Prior unrelated answer</div></message-content><div class="response-footer complete"></div></model-response></div>';
+    const page = content(followup ? oldTurn : "", followup ? chatUrl : "https://gemini.google.com/app");
+    const baseline = page.extractConversationTranscript();
+    page.document.body.insertAdjacentHTML("beforeend", `<div class="conversation-container">${read("fixtures/gemini-mixed-turn.html")}</div>`);
+    let current = page.document.querySelector(".conversation-container:not([id])");
+    const initial = page.extractConversationTranscript().messages.at(-1);
+    let now = Date.now();
+    let allocated = false;
+    page.context.Date = class extends Date { static now() { return now; } };
+    page.context.advanceTimer = async (ms) => {
+      now += ms;
+      if (!allocated) {
+        allocated = true;
+        current.id = "b0b0816f2d3b7530";
+        page.context.window.location = new URL(allocatedChatUrl);
+        // Read after assignment, then simulate a later DOM replacement using
+        // that same permanent turn ID. Neither transition can change binding.
+        page.extractConversationTranscript();
+        const replacement = current.cloneNode(true);
+        current.replaceWith(replacement);
+        current = replacement;
+        current.insertAdjacentHTML("beforeend", '<model-response><message-content><div class="markdown" aria-busy="false">Current marker: LATE-ID-42; Cedar</div></message-content><div class="response-footer complete"></div></model-response>');
+      }
+    };
+    vm.runInContext("workerSleep = advanceTimer", page.context);
+    const events = [];
+    await page.streamResponseSnapshots({ postMessage: (event) => events.push(event) }, 43, 2,
+      baseline, initial.text, "gemini-live-proof.pdf|1",
+      { pdfAttachmentReceipt: { method: "file_input", filenameConfirmed: true, readyConfirmed: true } }, 20000);
+    const terminal = events.find((event) => event.type === "terminal");
+    assert.ok(terminal);
+    assert.equal(terminal.userTurnKey, initial.messageKey);
+    assert.equal(terminal.assistantTurnKey, page.adapter.getMessageId(current.querySelector("model-response")));
+    assert.equal(terminal.text, "Current marker: LATE-ID-42; Cedar");
+    assert.equal(terminal.remoteChatUrl, allocatedChatUrl);
+    assert.equal(terminal.remoteChatId, followup ? "d11114e59cd9e350" : "44353066e9854a0f");
+    assert.equal(terminal.seq, 43);
+    assert.equal(terminal.attempt, 2);
+    assert.equal(terminal.diagnostic.submittedAttachmentCount, 2);
+    assert.equal(terminal.diagnostic.submittedPdfCount, 1);
+    assert.equal(terminal.diagnostic.submittedAttachmentVerified, true);
+    assert.ok(events.every((event) => !event.text?.includes("Prior unrelated answer")));
+  });
+}
