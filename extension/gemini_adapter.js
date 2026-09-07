@@ -95,6 +95,28 @@
             ? contract.pdfAttachmentCount === 1 && filenameMatched === true
             : attachments.length === 0 || attachments.every((name) => /^image(?:_\d+)?$/.test(name)) };
         },
+        resolveReplacementUserTurn({ transcript, baseline, promptText, expectedPdfFilename, expectedImageCount }) {
+          // A replaced provisional node has no observable link to its new ID.
+          // Rebind only while the entire pre-send baseline remains identifiable
+          // in order, with exactly one subsequent user carrying this request.
+          let boundary = -1;
+          for (const message of baseline.messages) {
+            const index = transcript.messages.findIndex((candidate) => candidate.messageKey === message.messageKey);
+            if (index <= boundary) return null;
+            boundary = index;
+          }
+          const users = transcript.messages.slice(boundary + 1).filter((message) => message.role === "user");
+          if (users.length !== 1) return null;
+          const candidate = users[0];
+          const normalizePrompt = (text) => String(text || "").normalize("NFC").replace(/\s+/g, " ").trim();
+          if (normalizePrompt(candidate.text) !== normalizePrompt(promptText)) return null;
+          const attachments = Array.isArray(candidate.attachments) ? candidate.attachments : [];
+          const contract = this.classifySubmittedAttachments(attachments, expectedPdfFilename);
+          const imageCount = attachments.filter((name) => /^image(?:_\d+)?$/.test(name)).length;
+          return contract.contractVerified && imageCount === expectedImageCount &&
+            attachments.length === (expectedPdfFilename ? 1 : 0) + expectedImageCount
+            ? candidate : null;
+        },
         async uploadFile(file, { wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now(), timeoutMs = 45000 } = {}) {
           const startedAt = now();
           const baseline = new Set(getComposerAttachments().map((card) => card.node));

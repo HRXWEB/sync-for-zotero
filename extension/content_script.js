@@ -3220,6 +3220,7 @@ async function streamResponseSnapshots(
   const expectedPdfFilename = String(attachmentFingerprint || "")
     .split("|", 1)[0]
     .trim();
+  const expectedImageCount = Number(String(attachmentFingerprint || "").split("|")[1]) || 0;
   const attachmentRequested = Boolean(expectedPdfFilename);
   let submittedAttachmentVerified = null;
   let submittedAttachmentCount = null;
@@ -3382,8 +3383,32 @@ async function streamResponseSnapshots(
       });
     }
 
-    let matchedUserTurn =
-      !userTurnKey || !attachmentContractVerified
+    const boundUserMissing = Boolean(
+      SITE_ADAPTER?.resolveReplacementUserTurn && userTurnKey &&
+      !transcript.messages.some((message) => message.role === "user" && message.messageKey === userTurnKey),
+    );
+    const replacementUserTurn = boundUserMissing
+      ? SITE_ADAPTER.resolveReplacementUserTurn({
+        transcript, baseline, promptText, expectedPdfFilename, expectedImageCount,
+      })
+      : null;
+    if (replacementUserTurn) {
+      recordTurnDebug("user_turn_rebound", { seq, attempt, previousUserTurnKey: userTurnKey, userTurnKey: replacementUserTurn.messageKey });
+      // Re-run the receipt check and completion evidence for the new identity.
+      // Never repair a lost user key by following an arbitrary latest answer.
+      userTurnKey = null;
+      assistantTurnKey = null;
+      reportedUserTurn = false;
+      reportedAssistantTurn = false;
+      attachmentContractVerified = false;
+      attachmentContractMismatchObservedAt = 0;
+      lastAnswerText = "";
+      lastThinkingText = "";
+      completionTracker = shared.createTurnCompletionTracker(nowMs);
+    }
+    let matchedUserTurn = boundUserMissing
+      ? replacementUserTurn
+      : !userTurnKey || !attachmentContractVerified
         ? findMatchingUserTurn(
           transcript,
           baselineTranscriptCount,

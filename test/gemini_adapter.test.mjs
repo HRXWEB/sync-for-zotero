@@ -474,8 +474,8 @@ test("observed mixed Gemini user turn identifies the actual PDF and uploaded ima
   assert.ok(page.document.querySelector('user-query-file-preview img[data-test-id="uploaded-img"]'));
 });
 
-for (const followup of [false, true]) {
-  test(`Gemini production tracker preserves ${followup ? "follow-up" : "fresh"} user binding across late ID allocation`, async () => {
+for (const [followup, directReplacement] of [[false, false], [true, false], [false, true], [true, true]]) {
+  test(`Gemini production tracker preserves ${followup ? "follow-up" : "fresh"} user binding across ${directReplacement ? "direct container replacement" : "late ID allocation"}`, async () => {
     const allocatedChatUrl = followup ? chatUrl : "https://gemini.google.com/app/44353066e9854a0f";
     const oldTurn = '<div class="conversation-container" id="prior"><user-query><div class="query-text-line">Read the attached test PDF. Reply with its marker and method name only.</div></user-query><model-response><message-content><div class="markdown" aria-busy="false">Prior unrelated answer</div></message-content><div class="response-footer complete"></div></model-response></div>';
     const page = content(followup ? oldTurn : "", followup ? chatUrl : "https://gemini.google.com/app");
@@ -490,12 +490,15 @@ for (const followup of [false, true]) {
       now += ms;
       if (!allocated) {
         allocated = true;
-        current.id = "b0b0816f2d3b7530";
         page.context.window.location = new URL(allocatedChatUrl);
-        // Read after assignment, then simulate a later DOM replacement using
-        // that same permanent turn ID. Neither transition can change binding.
-        page.extractConversationTranscript();
+        if (!directReplacement) {
+          current.id = "b0b0816f2d3b7530";
+          page.extractConversationTranscript();
+        }
+        // Direct replacement models live Gemini: no permanent ID was ever
+        // observable on the provisional node before it disappeared.
         const replacement = current.cloneNode(true);
+        replacement.id = "b0b0816f2d3b7530";
         current.replaceWith(replacement);
         current = replacement;
         current.insertAdjacentHTML("beforeend", '<model-response><message-content><div class="markdown" aria-busy="false">Current marker: LATE-ID-42; Cedar</div></message-content><div class="response-footer complete"></div></model-response>');
@@ -508,7 +511,8 @@ for (const followup of [false, true]) {
       { pdfAttachmentReceipt: { method: "file_input", filenameConfirmed: true, readyConfirmed: true } }, 20000);
     const terminal = events.find((event) => event.type === "terminal");
     assert.ok(terminal);
-    assert.equal(terminal.userTurnKey, initial.messageKey);
+    assert.equal(terminal.userTurnKey, directReplacement
+      ? "b0b0816f2d3b7530:user" : initial.messageKey);
     assert.equal(terminal.assistantTurnKey, page.adapter.getMessageId(current.querySelector("model-response")));
     assert.equal(terminal.text, "Current marker: LATE-ID-42; Cedar");
     assert.equal(terminal.remoteChatUrl, allocatedChatUrl);
@@ -521,3 +525,23 @@ for (const followup of [false, true]) {
     assert.ok(events.every((event) => !event.text?.includes("Prior unrelated answer")));
   });
 }
+
+test("Gemini replacement binding requires the baseline and one exact user with the requested attachments", () => {
+  const page = content();
+  assert.equal(typeof page.adapter.resolveReplacementUserTurn, "function");
+  const prior = { messageKey: "prior:user", role: "user", text: "same prompt", attachments: ["test.pdf", "image"] };
+  const priorAnswer = { messageKey: "prior:assistant", role: "assistant", text: "Wrong old answer" };
+  const current = { messageKey: "current:user", role: "user", text: "same prompt", attachments: ["test.pdf", "image"] };
+  const baseline = { messages: [prior, priorAnswer] };
+  const resolve = (messages, overrides = {}) => page.adapter.resolveReplacementUserTurn({
+    transcript: { messages }, baseline, promptText: "same prompt", expectedPdfFilename: "test.pdf", expectedImageCount: 1, ...overrides,
+  });
+  assert.equal(resolve([prior, priorAnswer, current])?.messageKey, "current:user");
+  assert.equal(resolve([prior, priorAnswer]), null);
+  assert.equal(resolve([current]), null);
+  assert.equal(resolve([prior, priorAnswer, current, { ...current, messageKey: "duplicate:user" }]), null);
+  assert.equal(resolve([prior, priorAnswer, { ...current, attachments: ["wrong-test.pdf", "image"] }]), null);
+  assert.equal(resolve([prior, priorAnswer, { ...current, attachments: ["test.pdf"] }]), null);
+  assert.equal(resolve([prior, priorAnswer, { ...current, text: "same prompt plus something" }]), null);
+  assert.equal(resolve([{ ...current, attachments: [] }], { baseline: { messages: [] }, expectedPdfFilename: "", expectedImageCount: 0 })?.messageKey, "current:user");
+});
