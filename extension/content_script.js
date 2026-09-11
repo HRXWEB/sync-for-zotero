@@ -6425,6 +6425,13 @@ async function _doScrapeHistory(options = {}) {
   let status = "ok";
   let networkStatus = null;
 
+  if (SITE_ADAPTER?.siteId === "gemini") {
+    const ready = await SITE_ADAPTER.prepareHistory({ wait: workerSleep, timeoutMs });
+    history = ready ? collectHistoryEntries() : [];
+    scrapedAt = Date.now();
+    status = history.length > 0 ? "ok" : "timeout";
+  }
+
   if (isDeepSeek) {
     const networkSnapshot = await waitForDeepSeekHistorySnapshot({
       minCapturedAt,

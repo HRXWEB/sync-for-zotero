@@ -211,6 +211,24 @@
         },
         getChatIdFromUrl(url) { return shared.normalizeGeminiConversationUrl(url)?.split("/").pop() || null; },
         historyLinkSelector: 'bard-sidenav a[href^="/app/"], bard-sidenav a[href^="https://gemini.google.com/app/"]',
+        async prepareHistory({ wait, now = Date.now, timeoutMs = 15_000 } = {}) {
+          const startedAt = now();
+          let opened = false;
+          while (true) {
+            if (document.querySelector(this.historyLinkSelector)) return true;
+            if (!opened) {
+              const button = Array.from(document.querySelectorAll('button[aria-label="Open sidebar"]'))
+                .find((node) => !node.disabled && isVisibleElement(node));
+              if (button) {
+                button.click();
+                opened = true;
+              }
+            }
+            const remaining = timeoutMs - (now() - startedAt);
+            if (remaining <= 0) return false;
+            await wait(Math.min(100, remaining));
+          }
+        },
         buildHistoryEntry(anchor) {
           const url = new URL(anchor.getAttribute("href"), "https://gemini.google.com").href;
           const chatUrl = shared.normalizeGeminiConversationUrl(url);

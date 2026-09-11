@@ -21,6 +21,7 @@ function content(html = "", url = chatUrl) {
   window.getComputedStyle = () => ({ display: "block", visibility: "visible" });
   window.HTMLElement.prototype.getBoundingClientRect = () => ({ width: 100, height: 30 });
   const listeners = [];
+  const sentMessages = [];
   const context = vm.createContext({
     window, document, URL, console, Node: window.Node, Element: window.Element,
     HTMLElement: window.HTMLElement, HTMLButtonElement: window.HTMLButtonElement,
@@ -28,18 +29,70 @@ function content(html = "", url = chatUrl) {
     Event: window.Event, SyncZoteroShared: shared,
     setInterval: () => 1, clearInterval() {}, setTimeout, clearTimeout,
     chrome: { runtime: { onMessage: { addListener(fn) { listeners.push(fn); } },
-      onConnect: { addListener() {} }, sendMessage() {} } },
+      onConnect: { addListener() {} }, sendMessage(message) { sentMessages.push(message); } } },
   });
   const adapterPath = new URL("../extension/gemini_adapter.js", import.meta.url);
   if (fs.existsSync(adapterPath)) vm.runInContext(fs.readFileSync(adapterPath, "utf8"), context);
   vm.runInContext(contentSource, context);
   const api = vm.runInContext(`({ adapter: SITE_ADAPTER, extractConversationTranscript,
-    findStopButton, collectHealthStatus, collectHistoryEntries,
+    findStopButton, collectHealthStatus, collectHistoryEntries, scrapeHistory,
     collectVisibleComposerPdfCardEvidence, resolveBoundAssistantTurn,
     findMatchingUserTurn, hasResponseActionBar, attachPDF, submitMessageAndVerify, streamResponseSnapshots, workerSleep,
     assertSubmissionConversation: typeof assertSubmissionConversation === "function" ? assertSubmissionConversation : null })`, context);
-  return { ...api, document, context, listeners };
+  return { ...api, document, context, listeners, sentMessages };
 }
+
+test("Gemini opens the usable sidebar control and waits for delayed history links", async () => {
+  const page = content('<button aria-label="Open sidebar" disabled></button><button id="toggle" aria-label="Open sidebar"></button><bard-sidenav></bard-sidenav>');
+  let clicks = 0;
+  let elapsed = 0;
+  page.document.querySelector('#toggle').addEventListener('click', () => { clicks++; });
+  const ready = await page.adapter.prepareHistory({
+    timeoutMs: 1000, now: () => elapsed,
+    wait: async (ms) => {
+      elapsed += ms;
+      if (elapsed >= 400) page.document.querySelector('bard-sidenav').innerHTML = '<a href="/app/d11114e59cd9e350">Old chat</a>';
+    },
+  });
+  assert.equal(ready, true);
+  assert.equal(clicks, 1);
+  assert.equal(page.collectHistoryEntries().length, 1);
+  assert.ok(elapsed >= 400);
+});
+
+test("Gemini leaves an already populated sidebar untouched", async () => {
+  const page = content('<button aria-label="Open sidebar"></button><bard-sidenav><a href="/app/d11114e59cd9e350">Old chat</a></bard-sidenav>');
+  page.document.querySelector('button').addEventListener('click', () => assert.fail('must not toggle'));
+  assert.equal(await page.adapter.prepareHistory({ wait: async () => assert.fail('must not wait') }), true);
+});
+
+test("Gemini history readiness times out when only answer-body links exist", async () => {
+  const page = content('<model-response><a href="/app/d11114e59cd9e350">Not history</a></model-response>');
+  let elapsed = 0;
+  assert.equal(await page.adapter.prepareHistory({ timeoutMs: 400, now: () => elapsed, wait: async (ms) => { elapsed += ms; } }), false);
+  assert.equal(elapsed, 400);
+});
+
+test("Gemini history scrape reports timeout rather than an empty account when the sidebar never loads", async () => {
+  const page = content('<bard-sidenav></bard-sidenav>');
+  const result = await page.scrapeHistory({ force: true, timeoutMs: 1 });
+  assert.equal(result.status, "timeout");
+  assert.equal(result.history.length, 0);
+  const update = page.sentMessages.find((message) => message.type === "HISTORY_UPDATE");
+  assert.equal(update.status, "timeout");
+  assert.equal(update.history.length, 0);
+});
+
+test("Gemini history scrape opens the sidebar before collecting sessions", async () => {
+  const page = content('<button aria-label="Open sidebar"></button><bard-sidenav></bard-sidenav>');
+  page.document.querySelector('button').addEventListener('click', () => {
+    page.document.querySelector('bard-sidenav').innerHTML = '<a href="/app/d11114e59cd9e350">Old chat</a>';
+  });
+  const result = await page.scrapeHistory({ force: true });
+  assert.equal(result.status, "ok");
+  assert.equal(result.history.length, 1);
+  assert.equal(result.history[0].title, "Old chat");
+});
 
 test("Gemini preserves inline data-math in sentences and table cells without duplicate glyphs", () => {
   const page = content(`<model-response><message-content><div class="markdown"><p>The mean is ${inlineMath}.</p><table><tr><th>Symbol</th></tr><tr><td>${inlineMath}</td></tr></table></div></message-content></model-response>`);

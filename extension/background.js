@@ -849,8 +849,8 @@ async function pollForStop() {
 }
 
 /**
- * ChatGPT: DOM-based history scrape.
- * The sidebar is rendered by React and already present in the DOM.
+ * ChatGPT and Gemini: DOM-based history scrape.
+ * Read the existing sidebar using each site's adapter.
  * Never reload — just scrape the existing page.
  */
 async function scrapeChatGPTHistory(siteConfig, historyStartedAt) {
@@ -1051,7 +1051,7 @@ async function pollForCommand() {
 
       let scrapeResult = null;
       try {
-        const scrape = scrapeSiteConfig.siteId === "chatgpt"
+        const scrape = (scrapeSiteConfig.siteId === "chatgpt" || scrapeSiteConfig.siteId === "gemini")
           ? scrapeChatGPTHistory
           : scrapeDeepSeekHistory;
         scrapeResult = await scrape(scrapeSiteConfig, historyStartedAt);
