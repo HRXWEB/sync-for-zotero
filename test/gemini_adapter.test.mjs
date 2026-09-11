@@ -12,6 +12,9 @@ const contentSource = read("../extension/content_script.js");
 const backgroundSource = read("../extension/background.js");
 const chatUrl = "https://gemini.google.com/app/d11114e59cd9e350";
 
+// Reduced observed Gemini HTML: source lives in data-math, not MathML.
+const inlineMath = '<span class="math-inline" data-math="\\mu"><span class="katex"><span class="katex-html" aria-hidden="true">μ</span></span></span>';
+
 function content(html = "", url = chatUrl) {
   const { window, document } = parseHTML(`<html><body>${html}</body></html>`);
   window.location = new URL(url);
@@ -36,6 +39,84 @@ function content(html = "", url = chatUrl) {
     findMatchingUserTurn, hasResponseActionBar, attachPDF, submitMessageAndVerify, streamResponseSnapshots, workerSleep,
     assertSubmissionConversation: typeof assertSubmissionConversation === "function" ? assertSubmissionConversation : null })`, context);
   return { ...api, document, context, listeners };
+}
+
+test("Gemini preserves inline data-math in sentences and table cells without duplicate glyphs", () => {
+  const page = content(`<model-response><message-content><div class="markdown"><p>The mean is ${inlineMath}.</p><table><tr><th>Symbol</th></tr><tr><td>${inlineMath}</td></tr></table></div></message-content></model-response>`);
+  const answer = page.adapter.extractAssistantAnswerText(page.document.querySelector("model-response"));
+  assert.match(answer, /The mean is \$\\mu\$\./);
+  assert.match(answer, /\| \$\\mu\$ \|/);
+  assert.ok(!answer.includes("μ"));
+  assert.equal(page.document.querySelectorAll("[aria-hidden=true]").length, 2, "extraction must not mutate live DOM");
+});
+
+test("Gemini preserves display data-math as a single display equation", () => {
+  const page = content('<model-response><message-content><div class="markdown"><div class="math-block" data-math="f(x)=x^2"><span class="katex-display"><span class="katex"><span class="katex-html" aria-hidden="true">glyphs</span></span></span></div></div></message-content></model-response>');
+  assert.equal(page.adapter.extractAssistantAnswerText(page.document.querySelector("model-response")), "$$f(x)=x^2$$");
+});
+
+test("Gemini keeps file citation identity from observed accessibility metadata", () => {
+  const page = content('<model-response><message-content><div class="markdown"><p>Value 952<source-inline-chip><div class="source-inline-chip-container"><button aria-label="View source details for citation from PDF: proof.pdf. Press Enter to open sources dialog."><span class="source-title">PDF</span></button></div></source-inline-chip>.</p></div></message-content></model-response>');
+  const answer = page.adapter.extractAssistantAnswerText(page.document.querySelector("model-response"));
+  assert.match(answer, /952.*proof\.pdf/);
+  assert.ok(!answer.includes("Press Enter"));
+  assert.ok(!answer.includes("undefined"));
+});
+
+test("Gemini preserves web sources outside Markdown without including response controls", () => {
+  const page = content('<model-response><message-content><div class="markdown"><p>Read the documentation.</p></div></message-content><div class="response-footer complete"><sources-list><a href="https://www.zotero.org/support/pdf_reader">Zotero PDF reader</a></sources-list><button>Copy response</button></div></model-response>');
+  const answer = page.adapter.extractAssistantAnswerText(page.document.querySelector("model-response"));
+  assert.match(answer, /\[Zotero PDF reader\]\(https:\/\/www\.zotero\.org\/support\/pdf_reader\)/);
+  assert.ok(!answer.includes('Copy response'));
+});
+
+test("Gemini retains a source list inside the Markdown owner exactly once", () => {
+  const page = content('<model-response><message-content><div class="markdown"><p>Result.</p><sources-list><a href="https://example.com/source">Source</a><button>More</button></sources-list></div></message-content></model-response>');
+  const answer = page.adapter.extractAssistantAnswerText(page.document.querySelector("model-response"));
+  assert.equal(answer.match(/https:\/\/example\.com\/source/g)?.length, 1);
+  assert.ok(!answer.includes('More'));
+});
+
+test("Gemini retains ordinary web links and source-chip links only once", () => {
+  const page = content('<model-response><message-content><div class="markdown"><p><a href="https://example.com/ordinary">Ordinary link</a><source-inline-chip><div class="source-inline-chip-container"><a href="https://example.com/paper">Paper</a></div></source-inline-chip></p></div></message-content></model-response>');
+  const answer = page.adapter.extractAssistantAnswerText(page.document.querySelector("model-response"));
+  assert.match(answer, /\[Ordinary link\]\(https:\/\/example\.com\/ordinary\)/);
+  assert.equal(answer.match(/https:\/\/example\.com\/paper/g)?.length, 1);
+});
+
+test("Gemini history excludes matching response links and other page navigation", () => {
+  const page = content('<bard-sidenav role="navigation"><a href="/app/d11114e59cd9e350">Real history</a></bard-sidenav><model-response><nav><a href="/app/2222222222222222">Example conversation</a></nav></model-response><nav><a href="/app/3333333333333333">Other navigation</a></nav>');
+  assert.deepEqual(JSON.parse(JSON.stringify(page.collectHistoryEntries())), [{id:"d11114e59cd9e350", title:"Real history", chatUrl}]);
+});
+
+for (const { name, pdf, images, requestedImages, ok } of [
+  { name: "missing image", pdf: false, images: 0, requestedImages: 1, ok: false },
+  { name: "PDF without requested image", pdf: true, images: 0, requestedImages: 1, ok: false },
+  { name: "image on prompt-only turn", pdf: false, images: 1, requestedImages: 0, ok: false },
+  { name: "PDF and image", pdf: true, images: 1, requestedImages: 1, ok: true },
+  { name: "image only", pdf: false, images: 1, requestedImages: 1, ok: true },
+  { name: "prompt only", pdf: false, images: 0, requestedImages: 0, ok: true },
+]) {
+  test(`Gemini production tracker validates complete requested attachments: ${name}`, async () => {
+    const page = content();
+    const baseline = page.extractConversationTranscript();
+    const file = pdf ? '<div data-test-id="uploaded-file"><span data-test-id="filename-label">proof</span><span class="extension-label">PDF</span></div>' : '';
+    const image = '<img data-test-id="uploaded-img" src="data:image/png;base64,AA==">'.repeat(images);
+    page.document.body.innerHTML = `<div class="conversation-container" id="receipt"><user-query><div class="query-text-line">Read this test.</div><user-query-file-preview>${file}${image}</user-query-file-preview></user-query><model-response><message-content><div class="markdown" aria-busy="false">Test result.</div></message-content><div class="response-footer complete"></div></model-response></div>`;
+    let now = Date.now();
+    page.context.Date = class extends Date { static now() { return now; } };
+    page.context.advanceTimer = async (ms) => { now += ms; };
+    vm.runInContext("workerSleep = advanceTimer", page.context);
+    const events = [];
+    const run = () => page.streamResponseSnapshots({ postMessage: event => events.push(event) }, 55, 1, baseline, "Read this test.", `${pdf ? 'proof.pdf' : ''}|${requestedImages}`, {}, 20000);
+    if (ok) {
+      await run();
+      assert.equal(events.find(e => e.type === 'terminal')?.diagnostic.reasonCode, 'verified_done');
+    } else {
+      await assert.rejects(run, /attachment|image|PDF/i);
+      assert.ok(!events.some(e => e.type === 'terminal' && e.diagnostic?.reasonCode === 'verified_done'));
+    }
+  });
 }
 
 test("Gemini URL normalization strips transient parameters only on exact HTTPS conversation routes", () => {
@@ -87,7 +168,7 @@ test("observed PDF turn extracts clean Markdown and stable role-specific keys du
   assert.deepEqual(Array.from(user.attachments), ["gemini-proof.pdf"]);
   assert.match(assistant.text, /GEMINI-PDF-73B9/);
   assert.match(assistant.text, /Cedar/);
-  assert.equal(assistant.text, 'Based on the "gemini-proof.pdf" file you provided, here is the extracted information:\n\n- **Secret marker:** GEMINI-PDF-73B9\n- **Fictional method name:** Cedar');
+  assert.equal(assistant.text, 'Based on the "gemini-proof.pdf" file you provided, here is the extracted information:\n\n- **Secret marker:** GEMINI-PDF-73B9   [PDF: gemini-proof.pdf]\n- **Fictional method name:** Cedar   [PDF: gemini-proof.pdf]');
   assert.notEqual(user.messageKey, assistant.messageKey);
   page.document.querySelector("message-content .markdown").innerHTML = '<p>Growing <strong>answer</strong> <a href="https://example.com">link</a></p><ul><li>item</li></ul>';
   const next = page.extractConversationTranscript();
@@ -127,7 +208,7 @@ test("composer PDF cards require settled readiness and never count historical or
 });
 
 test("Gemini stop uses localized structural control and history rejects external links", () => {
-  const page = content('<input-container><button aria-label="停止回答"><mat-icon fonticon="stop"></mat-icon></button></input-container><nav><a href="/app/d11114e59cd9e350">Test chat</a><a href="https://gemini.google.com.evil.test/app/aaaaaaaaaaaaaaaa">Bad</a></nav>');
+  const page = content('<input-container><button aria-label="停止回答"><mat-icon fonticon="stop"></mat-icon></button></input-container><bard-sidenav role="navigation"><a href="/app/d11114e59cd9e350">Test chat</a><a href="https://gemini.google.com.evil.test/app/aaaaaaaaaaaaaaaa">Bad</a></bard-sidenav>');
   assert.ok(page.findStopButton());
   assert.equal(page.collectHistoryEntries().length, 1);
   assert.equal(page.collectHistoryEntries()[0].chatUrl, chatUrl);
@@ -255,7 +336,7 @@ test("pre-submit Gemini URL check rejects navigation races and stale fresh-chat 
 test("Gemini submitted PDF contract rejects duplicate or differently named PDFs", () => {
   const page = content();
   assert.equal(typeof page.adapter.classifySubmittedAttachments, "function");
-  assert.equal(page.adapter.classifySubmittedAttachments(["test.pdf", "image"], "test.pdf").contractVerified, true);
+  assert.equal(page.adapter.classifySubmittedAttachments(["test.pdf", "image"], "test.pdf", 1).contractVerified, true);
   assert.equal(page.adapter.classifySubmittedAttachments(["test.pdf", "other.pdf"], "test.pdf").contractVerified, false);
   assert.equal(page.adapter.classifySubmittedAttachments(["other.pdf"], "test.pdf").contractVerified, false);
   assert.equal(page.adapter.classifySubmittedAttachments(["test.pdf"], "").contractVerified, false);

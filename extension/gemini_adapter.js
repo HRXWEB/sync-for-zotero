@@ -31,7 +31,41 @@
       };
       const clean = (node) => {
         const clone = node.cloneNode(true);
-        clone.querySelectorAll('button, [role="button"], [hidden], [aria-hidden="true"], .cdk-visually-hidden, .source-inline-chip-container, source-inline-chip, sources-list, .sources-list').forEach((el) => el.remove());
+        // Gemini's HTML-only KaTeX keeps the source on data-math; preserve it
+        // before removing aria-hidden rendering trees. Work on the clone only.
+        clone.querySelectorAll('[data-math]').forEach((el) => {
+          const latex = el.getAttribute('data-math')?.trim();
+          if (!latex) return;
+          const display = el.classList.contains('math-block') ||
+            el.classList.contains('katex-display') || Boolean(el.querySelector('.katex-display'));
+          el.replaceWith(document.createTextNode(display ? `\n$$${latex}$$\n` : `$${latex}$`));
+        });
+        // Citation chips are meaningful content, even when their only source
+        // identity is in a button's accessible label rather than visible text.
+        clone.querySelectorAll('source-inline-chip, .source-inline-chip-container').forEach((chip) => {
+          if (!clone.contains(chip)) return; // already replaced an outer chip
+          const replacement = document.createElement('span');
+          const links = Array.from(chip.querySelectorAll('a[href]')).filter((a) => /^https?:\/\//i.test(a.getAttribute('href') || ''));
+          if (links.length) {
+            links.forEach((a, index) => {
+              if (index) replacement.appendChild(document.createTextNode('; '));
+              const link = document.createElement('a');
+              link.setAttribute('href', a.getAttribute('href'));
+              link.textContent = a.getAttribute('aria-label') || a.textContent.trim() || a.getAttribute('href');
+              replacement.appendChild(link);
+            });
+          } else {
+            const label = chip.querySelector('[aria-label]')?.getAttribute('aria-label') || '';
+            const source = label.match(/^View source details for citation from (.+?)\. Press Enter to open sources dialog\.$/s)?.[1];
+            replacement.textContent = source || label || chip.textContent.trim();
+          }
+          if (replacement.textContent) {
+            replacement.prepend(document.createTextNode(' ['));
+            replacement.appendChild(document.createTextNode(']'));
+          }
+          chip.replaceWith(replacement);
+        });
+        clone.querySelectorAll('button, [role="button"], [hidden], [aria-hidden="true"], .cdk-visually-hidden').forEach((el) => el.remove());
         return clone;
       };
       const withExtension = (stem, extension) => {
@@ -68,7 +102,25 @@
         },
         extractAssistantAnswerText(node) {
           const markdown = node?.querySelector("message-content .markdown");
-          return markdown ? htmlToMarkdown(clean(markdown).innerHTML).trim() : "";
+          if (!markdown) return "";
+          const answer = htmlToMarkdown(clean(markdown).innerHTML).trim();
+          // Some sources are rendered in the response footer, outside the
+          // Markdown owner. Export actual web links, not the surrounding UI.
+          const sources = document.createElement('div');
+          const seen = new Set();
+          node.querySelectorAll('sources-list a[href], .sources-list a[href]').forEach((anchor) => {
+            const href = anchor.getAttribute('href') || '';
+            if (markdown.contains(anchor) || !/^https?:\/\//i.test(href) || seen.has(href)) return;
+            seen.add(href);
+            const paragraph = document.createElement('p');
+            const link = document.createElement('a');
+            link.setAttribute('href', href);
+            link.textContent = anchor.textContent.trim() || anchor.getAttribute('aria-label') || href;
+            paragraph.appendChild(link);
+            sources.appendChild(paragraph);
+          });
+          const sourceText = htmlToMarkdown(sources.innerHTML).trim();
+          return sourceText ? `${answer}\n\n${sourceText}`.trim() : answer;
         },
         extractAssistantThinkingText: () => "",
         extractAttachmentNames(node) {
@@ -84,16 +136,20 @@
           return Boolean(node && isVisibleElement(node) && node.querySelector('message-content .markdown[aria-busy="false"]') && node.querySelector(".response-footer.complete"));
         },
         getComposerAttachments,
-        classifySubmittedAttachments(attachments, expectedFilename) {
+        classifySubmittedAttachments(attachments, expectedFilename, expectedImageCount = 0) {
           const contract = shared.classifySubmittedPdfContract(attachments, expectedFilename);
           // Gemini exposes the complete filename stem and extension separately.
           // Its receipt must not inherit legacy substring/elision/rename matches.
           const filenameMatched = expectedFilename
             ? attachments.some((name) => normalizePdfFilename(name) === normalizePdfFilename(expectedFilename))
             : null;
-          return { ...contract, filenameMatched, contractVerified: expectedFilename
+          const imageCount = attachments.filter((name) => /^image(?:_\d+)?$/.test(name)).length;
+          const pdfVerified = expectedFilename
             ? contract.pdfAttachmentCount === 1 && filenameMatched === true
-            : attachments.length === 0 || attachments.every((name) => /^image(?:_\d+)?$/.test(name)) };
+            : contract.pdfAttachmentCount === 0;
+          return { ...contract, filenameMatched, contractVerified: pdfVerified &&
+            imageCount === expectedImageCount &&
+            attachments.length === (expectedFilename ? 1 : 0) + expectedImageCount };
         },
         resolveReplacementUserTurn({ transcript, baseline, expectedChatUrl, promptText, expectedPdfFilename, expectedImageCount }) {
           const conversationUrl = shared.normalizeGeminiConversationUrl(expectedChatUrl || baseline.chatUrl);
@@ -113,11 +169,8 @@
           const normalizePrompt = (text) => String(text || "").normalize("NFC").replace(/\s+/g, " ").trim();
           if (normalizePrompt(candidate.text) !== normalizePrompt(promptText)) return null;
           const attachments = Array.isArray(candidate.attachments) ? candidate.attachments : [];
-          const contract = this.classifySubmittedAttachments(attachments, expectedPdfFilename);
-          const imageCount = attachments.filter((name) => /^image(?:_\d+)?$/.test(name)).length;
-          return contract.contractVerified && imageCount === expectedImageCount &&
-            attachments.length === (expectedPdfFilename ? 1 : 0) + expectedImageCount
-            ? candidate : null;
+          const contract = this.classifySubmittedAttachments(attachments, expectedPdfFilename, expectedImageCount);
+          return contract.contractVerified ? candidate : null;
         },
         async uploadFile(file, { wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now(), timeoutMs = 45000 } = {}) {
           const startedAt = now();
@@ -157,7 +210,7 @@
           throw new Error(`Gemini did not confirm a ready attachment for "${file.name}".`);
         },
         getChatIdFromUrl(url) { return shared.normalizeGeminiConversationUrl(url)?.split("/").pop() || null; },
-        historyLinkSelector: 'a[href^="/app/"], a[href^="https://gemini.google.com/app/"]',
+        historyLinkSelector: 'bard-sidenav a[href^="/app/"], bard-sidenav a[href^="https://gemini.google.com/app/"]',
         buildHistoryEntry(anchor) {
           const url = new URL(anchor.getAttribute("href"), "https://gemini.google.com").href;
           const chatUrl = shared.normalizeGeminiConversationUrl(url);

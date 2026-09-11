@@ -3518,6 +3518,7 @@ async function streamResponseSnapshots(
       const contract = (SITE_ADAPTER?.classifySubmittedAttachments || shared.classifySubmittedPdfContract)(
         attachments,
         expectedPdfFilename,
+        expectedImageCount,
       );
       submittedAttachmentVerified = attachmentRequested
         ? contract.filenameMatched === true
@@ -3571,6 +3572,9 @@ async function streamResponseSnapshots(
       nowMs - attachmentContractMismatchObservedAt >=
         SUBMITTED_ATTACHMENT_CONTRACT_TIMEOUT_MS
     ) {
+      if (SITE_ADAPTER?.siteId === "gemini") {
+        throw new Error("The submitted Gemini attachments did not match the requested PDF and image count.");
+      }
       if (attachmentRequested) {
         throw new Error(
           `The submitted user turn did not contain the requested PDF "${expectedPdfFilename}".`,
